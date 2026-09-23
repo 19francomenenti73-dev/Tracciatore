@@ -54,10 +54,11 @@
   </div>
 
   <script>
-    const map = L.map('map', { zoomControl: false }).setView([41.9, 12.5], 6);
+    // Configurazione mappa con zoom libero per ispezionare il territorio in dettaglio
+    const map = L.map('map', { zoomControl: false, minZoom: 5, maxZoom: 14 }).setView([41.9, 12.5], 6);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-    // Mappa base OpenStreetMap pulita
+    // Mappa base OpenStreetMap chiara e pulita
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '© OpenStreetMap'
@@ -178,11 +179,11 @@
 
         if (radarLayer) map.removeLayer(radarLayer);
         
-        // CORRETTO: maxNativeZoom evita errori quando si zooma oltre il livello radar
+        // maxNativeZoom impedisce a Leaflet di richiedere tile inesistenti in alto zoom
         radarLayer = L.tileLayer(`${data.host}${frameT1.path}/256/{z}/{x}/{y}/2/1_1.png`, {
           opacity: 0.65,
-          maxNativeZoom: 7,
-          maxZoom: 19
+          maxNativeZoom: 6,
+          maxZoom: 14
         }).addTo(map);
 
         trackerGroup.clearLayers();
@@ -191,25 +192,38 @@
         document.getElementById('last-update').innerText = 
           d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
 
-        const z = 6, x = 34, y = 24;
-        const bounds = tileToBounds(x, y, z);
+        // Scansione ampliata su un grid di tile chiave che coprono l'Italia (Nord, Centro, Sud)
+        const z = 6;
+        const targetTiles = [
+          { x: 33, y: 23 }, { x: 34, y: 23 }, { x: 35, y: 23 },
+          { x: 33, y: 24 }, { x: 34, y: 24 }, { x: 35, y: 24 },
+          { x: 34, y: 25 }, { x: 35, y: 25 }
+        ];
 
-        const urlT0 = `${data.host}${frameT0.path}/256/${z}/${x}/${y}/2/1_1.png`;
-        const urlT1 = `${data.host}${frameT1.path}/256/${z}/${x}/${y}/2/1_1.png`;
+        let allCellsT0 = [];
+        let allCellsT1 = [];
 
-        const [cellsT0, cellsT1] = await Promise.all([
-          extractCellCentroids(urlT0, bounds),
-          extractCellCentroids(urlT1, bounds)
-        ]);
+        for (const t of targetTiles) {
+          const bounds = tileToBounds(t.x, t.y, z);
+          const urlT0 = `${data.host}${frameT0.path}/256/${z}/${t.x}/${t.y}/2/1_1.png`;
+          const urlT1 = `${data.host}${frameT1.path}/256/${z}/${t.x}/${t.y}/2/1_1.png`;
+
+          const [c0, c1] = await Promise.all([
+            extractCellCentroids(urlT0, bounds),
+            extractCellCentroids(urlT1, bounds)
+          ]);
+          allCellsT0.push(...c0);
+          allCellsT1.push(...c1);
+        }
 
         let trackedCount = 0;
         const dtHours = (frameT1.time - frameT0.time) / 3600;
 
-        cellsT1.forEach(c1 => {
+        allCellsT1.forEach(c1 => {
           let closest = null;
           let minDist = Infinity;
 
-          cellsT0.forEach(c0 => {
+          allCellsT0.forEach(c0 => {
             const dist = turf.distance(
               turf.point([c0.lng, c0.lat]),
               turf.point([c1.lng, c1.lat]),
@@ -221,13 +235,13 @@
             }
           });
 
-          if (closest && minDist < 25) {
+          if (closest && minDist < 35) {
             const speedKmH = Math.round(minDist / dtHours);
             
             const p0 = turf.point([closest.lng, closest.lat]);
             const p1 = turf.point([c1.lng, c1.lat]);
             let heading = turf.bearing(p0, p1);
-            if (heading < 0) heading += 365;
+            if (heading < 0) heading += 360;
 
             const proj30 = turf.destination(p1, (speedKmH * 0.5), heading, { units: 'kilometers' });
             const proj60 = turf.destination(p1, speedKmH, heading, { units: 'kilometers' });

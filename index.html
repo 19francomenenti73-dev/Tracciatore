@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nowcasting Italia Storm Tracker</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body, html { width: 100%; height: 100%; background: #000; color: #fff; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        #map { width: 100vw; height: 100vh; }
+
+        .hud-panel {
+            position: absolute; top: 12px; left: 12px; z-index: 1000;
+            background: rgba(13, 17, 23, 0.92); border: 1px solid #30363d;
+            border-radius: 8px; padding: 12px; width: 260px; font-size: 11px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.8); backdrop-filter: blur(8px);
+        }
+        .hud-title { font-weight: bold; color: #58a6ff; font-size: 12px; margin-bottom: 6px; }
+        .hud-stat { margin-top: 4px; display: flex; justify-content: space-between; }
+        .hud-val { font-weight: bold; color: #f0f6fc; }
+
+        .cell-tag {
+            background: rgba(218, 54, 51, 0.9); border: 1px solid #ff7b72;
+            color: white; font-size: 10px; font-weight: bold; padding: 2px 4px;
+            border-radius: 3px; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+        }
+        .eta-tag {
+            background: rgba(210, 153, 34, 0.9); border: 1px solid #f2cc60;
+            color: #000; font-size: 9px; font-weight: bold; padding: 1px 4px;
+            border-radius: 3px; white-space: nowrap;
+        }
+
+        #cvs-analysis { display: none; }
+    </style>
+</head>
+<body>
+
+<div class="hud-panel">
+    <div class="hud-title">NOWCASTING ITALIA STORM TRACKER</div>
+    <div class="hud-stat"><span>Stato Radar:</span> <span class="hud-val" id="radar-status">Caricamento...</span></div>
+    <div class="hud-stat"><span>Celle Rilevate:</span> <span class="hud-val" id="cell-count">0</span></div>
+    <div class="hud-stat"><span>Ultimo Aggiornamento:</span> <span class="hud-val" id="radar-time">-</span></div>
+</div>
+
+<div id="map"></div>
+<canvas id="cvs-analysis" width="256" height="256"></canvas>
+
+<script>
+    const map = L.map('map', { zoomControl: false, maxZoom: 12, minZoom: 5 }).setView([42.50, 12.50], 6);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 17 }).addTo(map);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png', { maxZoom: 17 }).addTo(map);
+
+    let radarTileLayer = null;
+    let vectorLayerGroup = L.layerGroup().addTo(map);
+
+    const TILE_Z = 6, TILE_X = 33, TILE_Y = 23;
+    const TILE_NW = { lat: 45.089, lng: 11.250 };
+    const TILE_SE = { lat: 40.979, lng: 16.875 };
+
+    function fetchAndProcessRadar() {
+        document.getElementById('radar-status').innerText = "Aggiornamento...";
+        
+        fetch('https://api.rainviewer.com/public/weather-maps.json')
+            .then(res => res.json())
+            .then(data => {
+                if (!data || !data.radar || !data.radar.past) return;
+                
+                const pastFrames = data.radar.past;
+                const frameT0 = pastFrames[pastFrames.length - 2];
+                const frameT1 = pastFrames[pastFrames.length - 1];
+
+                if (radarTileLayer) map.removeLayer(radarTileLayer);
+                radarTileLayer = L.tileLayer(`${data.host}${frameT1.path}/256/{z}/{x}/{y}/2/1_1.png`, { opacity: 0.75, zIndex: 100 });
+                radarTileLayer.addTo(map);
+
+                const timeStr = new Date(frameT1.time * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                document.getElementById('radar-time').innerText = timeStr;
+
+                const img0 = new Image();
+                const img1 = new Image();
+                img0.crossOrigin = "Anonymous";
+                img1.crossOrigin = "Anonymous";
+
+                img0.src = `${data.host}${frameT0.path}/256/${TILE_Z}/${TILE_X}/${TILE_Y}/2/1_1.png`;
+                img1.src = `${data.host}${frameT1.path}/256/${TILE_Z}/${TILE_X}/${TILE_Y}/2/1_1.png`;
+
+                let loaded = 0;
+                const checkLoaded = () => {
+                    loaded++;
+                    if (loaded === 2) processOpticalFlow(img0, img1);
+                };
+                img0.onload = checkLoaded;
+                img1.onload = checkLoaded;
+            })
+            .catch(() => {
+                document.getElementById('radar-status').innerText = "Errore Connessione";
+            });
+    }
+
+    function processOpticalFlow(img0, img1) {
+        const canvas = document.getElementById('cvs-analysis');
+        const ctx = canvas.getContext('2d');
+
+        ctx.drawImage(img0, 0, 0);
+        const data0 = ctx.getImageData(0, 0, 256, 256).data;
+
+        ctx.drawImage(img1, 0, 0);
+        const data1 = ctx.getImageData(0, 0, 256, 256).data;
+
+        vectorLayerGroup.clearLayers();
+        let detectedCells = 0;
+
+        const step = 8;
+        for (let y = step; y < 256 - step; y += step) {
+            for (let x = step; x < 256 - step; x += step) {
+                const idx = (y * 256 + x) * 4;
+                const r = data1[idx], g = data1[idx+1], b = data1[idx+2], a = data1[idx+3];
+
+                if (a > 100 && r > 120 && g < 200) {
+                    let bestDx = 0, bestDy = 0, minDiff = 999999;
+                    const searchRadius = 6;
+
+                    for (let dy = -searchRadius; dy <= searchRadius; dy++) {
+                        for (let dx = -searchRadius; dx <= searchRadius; dx++) {
+                            const refIdx = ((y + dy) * 256 + (x + dx)) * 4;
+                            const diff = Math.abs(data0[refIdx] - r) + Math.abs(data0[refIdx+1] - g);
+                            if (diff < minDiff) {
+                                minDiff = diff;
+                                bestDx = -dx;
+                                bestDy = -dy;
+                            }
+                        }
+                    }
+
+                    const speed = Math.sqrt(bestDx * bestDx + bestDy * bestDy) * 15;
+                    if (speed > 8) {
+                        detectedCells++;
+
+                        const cellLat = TILE_NW.lat - (y / 256) * (TILE_NW.lat - TILE_SE.lat);
+                        const cellLng = TILE_NW.lng + (x / 256) * (TILE_SE.lng - TILE_NW.lng);
+                        const heading = (Math.atan2(bestDx, -bestDy) * 180 / Math.PI + 360) % 360;
+
+                        renderVectorCell(cellLat, cellLng, heading, speed, `CELL-${detectedCells.toString().padStart(2, '0')}`);
+                    }
+                    x += step;
+                }
+            }
+        }
+
+        document.getElementById('cell-count').innerText = detectedCells;
+        document.getElementById('radar-status').innerText = "Attivo";
+    }
+
+    function renderVectorCell(lat, lng, heading, speedKmh, id) {
+        const center = turf.point([lng, lat]);
+
+        L.marker([lat, lng], {
+            icon: L.divIcon({ className: '', html: `<div class="cell-tag">${id} (${Math.round(speedKmh)} km/h)</div>` })
+        }).addTo(vectorLayerGroup);
+
+        const dist30m = speedKmh * 0.5;
+        const dest = turf.destination(center, dist30m, heading, { units: 'kilometers' }).geometry.coordinates;
+
+        L.polyline([[lat, lng], [dest[1], dest[0]]], {
+            color: '#f2cc60', weight: 2, dashArray: '4, 6'
+        }).addTo(vectorLayerGroup);
+
+        L.marker([dest[1], dest[0]], {
+            icon: L.divIcon({ className: '', html: `<div class="eta-tag">+30m</div>` })
+        }).addTo(vectorLayerGroup);
+    }
+
+    fetchAndProcessRadar();
+    setInterval(fetchAndProcessRadar, 300000);
+</script>
+
+</body>
+</html>

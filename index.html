@@ -3,60 +3,168 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nowcasting Italia - Real Storm Tracker</title>
+  <title>Nowcasting Italia - Storm Tracker</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
   <style>
-    html, body, #map { height: 100%; margin: 0; padding: 0; background: #0d1117; }
+    html, body, #map { height: 100%; margin: 0; padding: 0; background: #ffffff; }
     
     .hud-panel {
       position: absolute; top: 12px; left: 12px; z-index: 1000;
-      background: rgba(13, 17, 23, 0.92); border: 1px solid #30363d;
-      border-radius: 8px; padding: 12px; color: #c9d1d9;
+      background: rgba(255, 255, 255, 0.92); border: 1px solid #ccc;
+      border-radius: 8px; padding: 12px; color: #222;
       font-family: system-ui, -apple-system, sans-serif; font-size: 12px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.6); width: 230px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.3); width: 240px;
     }
-    .hud-title { font-weight: bold; color: #58a6ff; margin-bottom: 6px; font-size: 13px; text-transform: uppercase; }
-    .hud-stat { display: flex; justify-content: space-between; margin-top: 4px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 3px; }
-    .hud-val { font-weight: bold; color: #f0f6fc; }
+    .hud-title { font-weight: bold; color: #0055bb; margin-bottom: 6px; font-size: 13px; text-transform: uppercase; }
+    .hud-stat { display: flex; justify-content: space-between; margin-top: 4px; border-bottom: 1px solid rgba(0,0,0,0.1); padding-bottom: 3px; }
+    .hud-val { font-weight: bold; color: #000; }
     
     .cell-tag {
-      background: rgba(13, 17, 23, 0.9);
-      border: 1px solid #ff7b72;
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid #d32f2f;
       border-radius: 4px;
-      color: #f0f6fc;
+      color: #b71c1c;
       font-family: monospace;
       font-size: 10px;
       font-weight: bold;
       padding: 2px 5px;
       white-space: nowrap;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
       text-align: center;
+    }
+
+    .arrow-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
   </style>
 </head>
 <body>
   <div id="map"></div>
   <div class="hud-panel">
-    <div class="hud-title">⚡ NOWCASTING TRACKER</div>
+    <div class="hud-title">⚡ Nowcasting Tracker</div>
+    <div class="hud-stat"><span>Algoritmo:</span><span class="hud-val">TREC + DBSCAN</span></div>
     <div class="hud-stat"><span>Soglia dBZ:</span><span class="hud-val">> 32 dBZ</span></div>
-    <div class="hud-stat"><span>Celle Attive:</span><span id="cell-count" class="hud-val">0</span></div>
+    <div class="hud-stat"><span>Celle Attive:</span><span id="cell-count" class="hud-val">Analisi...</span></div>
     <div class="hud-stat"><span>Ultimo Frame:</span><span id="last-update" class="hud-val">--:--</span></div>
+    <div class="hud-stat"><span>Stato Radar:</span><span id="radar-status" class="hud-val" style="color:#2e7d32;">Attivo</span></div>
   </div>
 
   <script>
     const map = L.map('map', { zoomControl: false }).setView([41.9, 12.5], 6);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-    // Mappa Muta scura libera al 100% senza API KEY
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_labels_under/{z}/{x}/{y}{r}.png', {
+    // MAPPA BASE CHIARA STANDARD (OpenStreetMap) - No API Key
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
-      subdomains: 'abcd',
       attribution: '© OpenStreetMap'
     }).addTo(map);
 
     let radarLayer = null;
     let trackerGroup = L.layerGroup().addTo(map);
+
+    function createArrowIcon(heading) {
+      const svg = `
+        <svg width="22" height="22" viewBox="0 0 24 24" style="transform: rotate(${heading}deg); transform-origin: center;">
+          <path d="M12 2 L20 20 L12 16 L4 20 Z" fill="#d32f2f" stroke="#ffffff" stroke-width="1.5" />
+        </svg>`;
+      return L.divIcon({
+        html: svg,
+        className: 'arrow-icon',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11]
+      });
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    function loadTileImage(url) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = "Anonymous";
+        img.onload = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = url;
+      });
+    }
+
+    async function extractCellCentroids(tileUrl, tileBounds) {
+      const img = await loadTileImage(tileUrl);
+      if (!img) return [];
+
+      ctx.clearRect(0, 0, 256, 256);
+      ctx.drawImage(img, 0, 0);
+      const imgData = ctx.getImageData(0, 0, 256, 256).data;
+
+      const points = [];
+      for (let y = 0; y < 256; y += 4) {
+        for (let x = 0; x < 256; x += 4) {
+          const idx = (y * 256 + x) * 4;
+          const r = imgData[idx];
+          const g = imgData[idx + 1];
+          const b = imgData[idx + 2];
+          const a = imgData[idx + 3];
+
+          if (a > 30) {
+            const isConvective = (r > 180 && g > 100) || (r > 200 && g < 100) || (r > 150 && b > 150);
+            if (isConvective) {
+              const lat = tileBounds.north - (y / 256) * (tileBounds.north - tileBounds.south);
+              const lng = tileBounds.west + (x / 256) * (tileBounds.east - tileBounds.west);
+              points.push(turf.point([lng, lat]));
+            }
+          }
+        }
+      }
+
+      if (points.length < 8) return [];
+
+      const fc = turf.featureCollection(points);
+      const clustered = turf.clustersDbscan(fc, 15, { units: 'kilometers', minPoints: 6 });
+
+      const clusterMap = {};
+      clustered.features.forEach(pt => {
+        const cId = pt.properties.dbscan;
+        if (cId !== undefined) {
+          if (!clusterMap[cId]) clusterMap[cId] = [];
+          clusterMap[cId].push(pt);
+        }
+      });
+
+      const centroids = [];
+      Object.keys(clusterMap).forEach(cId => {
+        const pts = clusterMap[cId];
+        if (pts.length >= 6) {
+          const center = turf.centroid(turf.featureCollection(pts));
+          centroids.push({
+            lng: center.geometry.coordinates[0],
+            lat: center.geometry.coordinates[1],
+            mass: pts.length
+          });
+        }
+      });
+
+      return centroids;
+    }
+
+    function tileToBounds(x, y, z) {
+      const n = Math.pow(2, z);
+      const lngDegMin = x / n * 360 - 180;
+      const lngDegMax = (x + 1) / n * 360 - 180;
+      const latRadMin = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n)));
+      const latRadMax = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)));
+      return {
+        west: lngDegMin,
+        east: lngDegMax,
+        south: latRadMin * 180 / Math.PI,
+        north: latRadMax * 180 / Math.PI
+      };
+    }
 
     async function updateTracker() {
       try {
@@ -65,19 +173,116 @@
         if (!data || !data.radar || !data.radar.past || data.radar.past.length < 2) return;
 
         const past = data.radar.past;
-        const frame1 = past[past.length - 1];
+        const frameT0 = past[past.length - 2];
+        const frameT1 = past[past.length - 1];
 
         if (radarLayer) map.removeLayer(radarLayer);
-        radarLayer = L.tileLayer(`${data.host}${frame1.path}/256/{z}/{x}/{y}/2/1_1.png`, {
+        radarLayer = L.tileLayer(`${data.host}${frameT1.path}/256/{z}/{x}/{y}/2/1_1.png`, {
           opacity: 0.65
         }).addTo(map);
 
-        const d = new Date(frame1.time * 1000);
+        trackerGroup.clearLayers();
+
+        const d = new Date(frameT1.time * 1000);
         document.getElementById('last-update').innerText = 
           d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
 
+        const z = 6, x = 34, y = 24;
+        const bounds = tileToBounds(x, y, z);
+
+        const urlT0 = `${data.host}${frameT0.path}/256/${z}/${x}/${y}/2/1_1.png`;
+        const urlT1 = `${data.host}${frameT1.path}/256/${z}/${x}/${y}/2/1_1.png`;
+
+        const [cellsT0, cellsT1] = await Promise.all([
+          extractCellCentroids(urlT0, bounds),
+          extractCellCentroids(urlT1, bounds)
+        ]);
+
+        let trackedCount = 0;
+        const dtHours = (frameT1.time - frameT0.time) / 3600;
+
+        cellsT1.forEach(c1 => {
+          let closest = null;
+          let minDist = Infinity;
+
+          cellsT0.forEach(c0 => {
+            const dist = turf.distance(
+              turf.point([c0.lng, c0.lat]),
+              turf.point([c1.lng, c1.lat]),
+              { units: 'kilometers' }
+            );
+            if (dist < minDist) {
+              minDist = dist;
+              closest = c0;
+            }
+          });
+
+          if (closest && minDist < 25) {
+            const speedKmH = Math.round(minDist / dtHours);
+            
+            const p0 = turf.point([closest.lng, closest.lat]);
+            const p1 = turf.point([c1.lng, c1.lat]);
+            let heading = turf.bearing(p0, p1);
+            if (heading < 0) heading += 360;
+
+            const proj30 = turf.destination(p1, (speedKmH * 0.5), heading, { units: 'kilometers' });
+            const proj60 = turf.destination(p1, speedKmH, heading, { units: 'kilometers' });
+
+            const currentPos = [c1.lat, c1.lng];
+            const pos30 = [proj30.geometry.coordinates[1], proj30.geometry.coordinates[0]];
+            const pos60 = [proj60.geometry.coordinates[1], proj60.geometry.coordinates[0]];
+
+            L.circle(currentPos, {
+              color: '#d32f2f',
+              fillColor: '#d32f2f',
+              fillOpacity: 0.25,
+              radius: Math.max(5000, c1.mass * 800),
+              weight: 2
+            }).addTo(trackerGroup);
+
+            L.polyline([currentPos, pos30], {
+              color: '#2e7d32',
+              weight: 3,
+              dashArray: '6, 6'
+            }).addTo(trackerGroup);
+
+            L.polyline([pos30, pos60], {
+              color: '#f57c00',
+              weight: 2,
+              dashArray: '4, 4'
+            }).addTo(trackerGroup);
+
+            L.marker(currentPos, { icon: createArrowIcon(heading) }).addTo(trackerGroup);
+
+            L.circleMarker(pos30, {
+              radius: 5,
+              color: '#2e7d32',
+              fillColor: '#ffffff',
+              fillOpacity: 1,
+              weight: 2
+            }).addTo(trackerGroup).bindTooltip("Previsto tra +30 min", { permanent: false });
+
+            const labelText = `⚡ CELLA | ${speedKmH} km/h | ${Math.round(heading)}°`;
+            L.marker(currentPos, {
+              icon: L.divIcon({
+                className: 'cell-tag',
+                html: labelText,
+                iconAnchor: [-10, 25]
+              })
+            }).addTo(trackerGroup);
+
+            trackedCount++;
+          }
+        });
+
+        document.getElementById('cell-count').innerText = trackedCount;
+        document.getElementById('radar-status').innerText = "Attivo";
+        document.getElementById('radar-status').style.color = "#2e7d32";
+
       } catch (e) {
-        console.error("Errore aggiornamento:", e);
+        console.error("Errore Nowcasting Tracker:", e);
+        document.getElementById('radar-status').innerText = "Errore";
+        document.getElementById('radar-status').style.color = "#d32f2f";
       }
     }
 

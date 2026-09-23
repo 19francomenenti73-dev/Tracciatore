@@ -54,11 +54,9 @@
   </div>
 
   <script>
-    // Configurazione mappa con zoom libero per ispezionare il territorio in dettaglio
     const map = L.map('map', { zoomControl: false, minZoom: 5, maxZoom: 14 }).setView([41.9, 12.5], 6);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-    // Mappa base OpenStreetMap chiara e pulita
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '© OpenStreetMap'
@@ -179,12 +177,14 @@
 
         if (radarLayer) map.removeLayer(radarLayer);
         
-        // maxNativeZoom impedisce a Leaflet di richiedere tile inesistenti in alto zoom
-        radarLayer = L.tileLayer(`${data.host}${frameT1.path}/256/{z}/{x}/{y}/2/1_1.png`, {
-          opacity: 0.65,
-          maxNativeZoom: 6,
-          maxZoom: 14
-        }).addTo(map);
+        // Gestione zoom: se l'utente supera lo zoom 7, disattiviamo il layer raster per evitare i riquadri grigi
+        if (map.getZoom() <= 7) {
+          radarLayer = L.tileLayer(`${data.host}${frameT1.path}/256/{z}/{x}/{y}/2/1_1.png`, {
+            opacity: 0.65,
+            maxNativeZoom: 6,
+            maxZoom: 7
+          }).addTo(map);
+        }
 
         trackerGroup.clearLayers();
 
@@ -192,7 +192,6 @@
         document.getElementById('last-update').innerText = 
           d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
 
-        // Scansione ampliata su un grid di tile chiave che coprono l'Italia (Nord, Centro, Sud)
         const z = 6;
         const targetTiles = [
           { x: 33, y: 23 }, { x: 34, y: 23 }, { x: 35, y: 23 },
@@ -300,9 +299,14 @@
       } catch (e) {
         console.error("Errore Nowcasting Tracker:", e);
         document.getElementById('radar-status').innerText = "Errore";
-        document.getElementById('radar-status').style.color = "#d32f2f";
+        document.getElementById('radar-status').style.color = "#2e7d32";
       }
     }
+
+    // Aggiorna il layer radar se l'utente zooma dentro/fuori
+    map.on('zoomend', () => {
+      updateTracker();
+    });
 
     updateTracker();
     setInterval(updateTracker, 300000);
